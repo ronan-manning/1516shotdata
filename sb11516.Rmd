@@ -1,0 +1,336 @@
+---
+title: "sb1516"
+output: html_document
+date: "2023-12-26"
+---
+
+```{r}
+library(tidyverse)
+library(devtools)
+library(ggplot2)
+library(remotes)
+library(SBpitch)
+library(StatsBombR)
+library(grid)
+library(data.table)
+library(tidyr)
+library(worldfootballR)
+library(ggrepel)
+library(ggsoccer)
+library(ggforce)
+```
+
+```{r}
+all_events_1516 <- readRDS("/Users/KIDS/Downloads/all_events_1516.rds")
+
+sb_passes <- all_events_1516 %>%
+  filter(type.name == "Pass") %>%
+  mutate(pass_outcome_1 = replace_na(pass.outcome.name,"Complete"),
+         position.name = str_replace(position.name, "Right Center Forward", "Center Forward"),
+         position.name = str_replace(position.name, "Left Center Forward", "Center Forward"),
+         position.name = str_replace(position.name, "Right Center Midfield", "Center Midfield"),
+         position.name = str_replace(position.name, "Left Center Midfield", "Center Midfield"),
+         position.name = str_replace(position.name, "Right Defensive Midfield", "Center Defensive Midfield"),
+         position.name = str_replace(position.name, "Left Defensive Midfield", "Center Defensive Midfield"),
+         position.name = str_replace(position.name, "Right Attacking Midfield", "Center Attacking Midfield"),
+         position.name = str_replace(position.name, "Left Attacking Midfield", "Center Attacking Midfield"),
+         position.name = str_replace(position.name, "Right Center Back", "Center Back"),
+         position.name = str_replace(position.name, "Left Center Back", "Center Back"))
+```
+
+```{r}
+sb_passers <- sb_passes %>%
+  group_by(player.name, position.name) %>%
+  summarize(att = n(), cmp = sum(pass_outcome_1 == "Complete"), rate = round(100*cmp/att,4))
+```
+
+```{r}
+minutes_df <- data.frame(matrix(ncol = 4, nrow = 2636))
+colnames(minutes_df) <- c("player_name", "apps", "starts", "mins")
+
+minutes_df$player_name <- unique(all_events_1516$player.name)
+
+minutes_df <- tail(minutes_df,2635)
+
+minutes_df$apps = 0
+minutes_df$starts = 0
+minutes_df$mins = 0
+```
+
+
+```{r}
+xiexist <- all_events_1516 %>%
+  filter(type.name %in% c("Starting XI", "Player Off", "Substitution") | bad_behaviour.card.name %in% c("Second Yellow", "Red Card") | foul_committed.card.name %in% c("Second Yellow", "Red Card")) %>%
+  mutate(bad_behaviour.card.name = replace_na(bad_behaviour.card.name,"NONE")) %>%
+  mutate(foul_committed.card.name = replace_na(foul_committed.card.name,"NONE")) %>%
+  mutate(player_off.permanent = replace_na(player_off.permanent,FALSE))
+```
+
+```{r}
+for(i in 1:nrow(xiexist)) {
+  if(xiexist$type.name[i] == "Starting XI") {
+    for(x in 1:11) {
+      player <- xiexist[[24]][[i]]$player.name[x] #24 is the column index of xi info/df, 1 is just to get there
+      index <- which(minutes_df$player_name == player)[1]
+      minutes_df$apps[index] = minutes_df$apps[index] + 1
+      minutes_df$starts[index] = minutes_df$starts[index] + 1
+      minutes_df$mins[index] = minutes_df$mins[index] + 90
+    }
+  }
+  else if(xiexist$type.name[i] == "Substitution") { #if player subbed, subtract mins left from his 90 for the game and add to subbed on player's mins 
+    mins_left <- 90 - xiexist$minute[i]
+    
+    player_off <- xiexist$player.name[i]
+    index_off <- which(minutes_df$player_name == player_off)[1]
+    minutes_df$mins[index_off] <- minutes_df$mins[index_off] - mins_left
+    
+    player_on <- xiexist$substitution.replacement.name[i]
+    index_on <- which(minutes_df$player_name == player_on)[1]
+    minutes_df$mins[index_on] <- minutes_df$mins[index_on] + mins_left
+    minutes_df$apps[index_on] <- minutes_df$apps[index_on] + 1
+
+  }
+  else if( (xiexist$type.name[i] == "Player Off" & xiexist$player_off.permanent[i] == TRUE) | xiexist$bad_behaviour.card.name[i] %in% c("Second Yellow", "Red Card") | xiexist$foul_committed.card.name[i] %in% c("Second Yellow", "Red Card")) { #if player off and not replaced, subtract mins left from his 90 for the game
+    
+      mins_left <- 90 - xiexist$minute[i]
+      player <- xiexist$player.name[i]
+      index <- which(minutes_df$player_name == player)[1]
+      
+      minutes_df$mins[index] <- minutes_df$mins[index] - mins_left
+
+  }
+}
+
+minutes_df <- minutes_df %>%
+  filter(starts > 0)
+```
+
+```{r}
+all_events_posfixed <- all_events_1516 %>%
+  mutate(position.name = str_replace(position.name, "Right Center Forward", "Center Forward"),
+         position.name = str_replace(position.name, "Left Center Forward", "Center Forward"),
+         position.name = str_replace(position.name, "Right Center Midfield", "Center Midfield"),
+         position.name = str_replace(position.name, "Left Center Midfield", "Center Midfield"),
+         position.name = str_replace(position.name, "Right Defensive Midfield", "Center Defensive Midfield"),
+         position.name = str_replace(position.name, "Left Defensive Midfield", "Center Defensive Midfield"),
+         position.name = str_replace(position.name, "Right Attacking Midfield", "Center Attacking Midfield"),
+         position.name = str_replace(position.name, "Left Attacking Midfield", "Center Attacking Midfield"),
+         position.name = str_replace(position.name, "Right Center Back", "Center Back"),
+         position.name = str_replace(position.name, "Left Center Back", "Center Back"))
+```
+
+```{r}
+Mode <- function(x) {
+  ux <- unique(x)
+  ux[which.max(tabulate(match(x, ux)))]
+}
+
+players_pre <- all_events_posfixed %>%
+  group_by(player.name) %>%
+  summarize(position = Mode(position.name), club = Mode(team.name), league = as.character(Mode(competition_id))) %>%
+  mutate(league = str_replace(league, "9", "Bundesliga"),
+         league = str_replace(league, "12", "Serie A"),
+         league = str_replace(league, "2", "Premier League"),
+         league = str_replace(league, "7", "Ligue 1"),
+         league = str_replace(league, "11", "La Liga"))
+
+players_df <- players_pre %>%
+  left_join(minutes_df, by=c("player.name" = "player_name"))
+```
+
+
+```{r}
+np_shots <- all_events_1516 %>%
+  filter(type.name == "Shot" & shot.type.name != "Penalty") %>%
+  mutate(pass_outcome_1 = replace_na(pass.outcome.name,"Complete"),
+         shot.outcome.name = str_replace(shot.outcome.name, "Off T", "Off Target"),
+         position.name = str_replace(position.name, "Right Center Forward", "Center Forward"),
+         position.name = str_replace(position.name, "Left Center Forward", "Center Forward"),
+         position.name = str_replace(position.name, "Right Center Midfield", "Center Midfield"),
+         position.name = str_replace(position.name, "Left Center Midfield", "Center Midfield"),
+         position.name = str_replace(position.name, "Right Defensive Midfield", "Center Defensive Midfield"),
+         position.name = str_replace(position.name, "Left Defensive Midfield", "Center Defensive Midfield"),
+         position.name = str_replace(position.name, "Right Attacking Midfield", "Center Attacking Midfield"),
+         position.name = str_replace(position.name, "Left Attacking Midfield", "Center Attacking Midfield"),
+         position.name = str_replace(position.name, "Right Center Back", "Center Back"),
+         position.name = str_replace(position.name, "Left Center Back", "Center Back"))
+```
+
+
+```{r}
+np_shooters <- np_shots %>%
+  group_by(player.name) %>% #  group_by(player.name, position.name) %>%
+  summarize(shots = n(), goals = sum(shot.outcome.name == "Goal"), total_xg = sum(shot.statsbomb_xg), xg_per_shot = round(total_xg/shots, 4), goals_above_xg = goals - total_xg, over_per_shot = goals_above_xg/shots, firsttime = sum(shot.first_time == TRUE, na.rm = TRUE), firsttime_pct = 100*round(firsttime/shots,4),mean_distD1 = mean(distance.ToD1.360), mean_distD2 = mean(distance.ToD2.360), mean_defendersInCone = mean(DefendersInCone), mean_distToGoal = mean(DistToGoal))
+
+np_shooters <- players_df %>%
+  left_join(np_shooters, by=c("player.name" = "player.name")) %>%
+  head(2635)
+
+np_shooters <- replace(np_shooters, is.na(np_shooters), 0)
+
+write_csv(np_shooters, "/Users/KIDS/Downloads/shooters1516_2.csv")
+```
+
+```{r}
+ggplot() + 
+  geom_point(data = np_shooters %>% filter(shots > 25), aes(x = shots, y = xg_per_shot, color = firsttime_pct)) + 
+  theme_bw() + 
+  scale_color_continuous(low = "yellow", high = "blue")
+```
+
+
+
+
+
+```{r}
+create_StatsBomb_ShotMap <- function(grass_colour, line_colour, background_colour, goal_colour){
+  
+  theme_blankPitch = function(size=12) { 
+    theme(
+      #axis.line=element_blank(), 
+      axis.text.x=element_blank(), 
+      axis.text.y=element_blank(), 
+      #axis.ticks.y=element_text(size=size),
+      #   axis.ticks=element_blank(),
+      axis.ticks.length=unit(0, "lines"), 
+      #axis.ticks.margin=unit(0, "lines"), 
+      axis.title.x=element_blank(), 
+      axis.title.y=element_blank(), 
+      legend.background=element_rect(fill=background_colour, colour=NA), 
+      legend.key=element_rect(colour=background_colour,fill=background_colour), 
+      legend.key.size=unit(1.2, "lines"), 
+      legend.text=element_text(size=size), 
+      legend.title=element_text(size=size, face="bold",hjust=0),
+      strip.background = element_rect(colour = background_colour, fill = background_colour, size = .5),
+      panel.background=element_rect(fill=background_colour,colour=background_colour), 
+      #       panel.border=element_blank(), 
+      panel.grid.major=element_blank(), 
+      panel.grid.minor=element_blank(), 
+      panel.spacing=element_blank(), 
+      plot.background=element_blank(), 
+      plot.margin=unit(c(0, 0, 0, 0), "lines"), 
+      plot.title=element_text(size=size*1.2), 
+      strip.text.y=element_text(colour=background_colour,size=size,angle=270),
+      strip.text.x=element_text(size=size*1))}
+  
+    ymin <- 0 # minimum width
+    ymax <- 80 # maximum width
+    xmin <- 80 # minimum length
+    xmax <- 120 # maximum length
+    
+    # Defining features along the length
+    boxEdgeOff <- 102
+    sixYardOff <- 114
+    penSpotOff <- 108
+    halfwayline <- 60
+    
+    # Defining features along the width
+    boxEdgeLeft <- 18
+    boxEdgeRight <- 62
+    sixYardLeft <- 30 
+    sixYardRight <- 50
+    goalPostLeft <- 36
+    goalPostRight <- 44
+    centreSpot <- c(60,40)   
+    
+    # other dimensions
+    centreCirle_d <- 20   
+  
+  ## define the circle function
+  circleFun <- function(center = c(0,0),diameter = 1, npoints = 100){
+    r = diameter / 2
+    tt <- seq(0,2*pi,length.out = npoints)
+    xx <- center[1] + r * cos(tt)
+    yy <- center[2] + r * sin(tt)
+    return(data.frame(x = xx, y = yy))
+  }
+
+  #### create leftD arc ####
+  dArc <- circleFun(c(CentreSpot, penSpotOff), centreCirle_d, npoints = 1000)
+  dArc <- dArc[dArc$y <= boxEdgeOff,]
+  
+  halfwayArc <- data.frame(circleFun(centreSpot, centreCirle_d, npoints = 1000))
+  halfwayArc <- halfwayArc[halfwayArc$y >= 108 & halfwayArc$y <= 102, ]
+  
+    ## initiate the plot, set some boundries to the plot
+   p <- ggplot() + xlim(c(ymin,ymax)) + ylim(c(xmin,xmax)) +
+  # add the theme 
+  theme_blankPitch() +
+  # add the base rectangle of the pitch 
+  geom_rect(aes(xmin=ymin, xmax=ymax, ymin=xmin, ymax=xmax), fill = grass_colour, colour = line_colour) +
+  # add the 18 yard box offensive
+  geom_rect(aes(xmin=boxEdgeLeft, xmax=boxEdgeRight, ymin=boxEdgeOff, ymax=xmax), fill = grass_colour, colour = line_colour) +
+  # add the six yard box offensive
+  geom_rect(aes(xmin=sixYardLeft, xmax=sixYardRight, ymin=sixYardOff, ymax=xmax), fill = grass_colour, colour = line_colour) +
+  # add the arc circle 
+  geom_path(data=dArc, aes(x=x,y=y), colour = line_colour) +
+     
+  geom_path(data = halfwayArc, aes(x = x, y = y), colour = line_colour) +
+
+  # add penalty spot 
+  geom_point(aes(x = CentreSpot , y = penSpotOff), colour = line_colour) +
+     # add the goal offensive
+  geom_segment(aes(x = goalPostLeft, y = xmax, xend = goalPostRight, yend = xmax),colour = goal_colour, size = 1) + 
+  #halfway line
+  geom_rect(aes(xmin = 0, ymin = 60, xmax = 80, ymax = 60),colour = line_colour)
+
+   
+  
+  return(p)
+}
+```
+
+```{r}
+p <- create_StatsBomb_ShotMap("darkgray", "white", "darkgray", "black") + geom_point(aes(x = 40, y = 60), shape = 1, size = 50, color = "white") 
+```
+
+```{r}
+shooter = "Harry Kane"
+
+shots_player <- np_shots %>%
+  filter(player.name == shooter)
+
+p + 
+  geom_point(data = shots_player, aes(y = location.x, x = location.y, size = shot.statsbomb_xg, color = shot.outcome.name), alpha = 0.6) + 
+  theme(plot.title = element_text(size = 24, color = "black",family="Trebuchet MS",face="bold", hjust = 0.5,vjust = -3),
+        plot.subtitle = element_text(size = 12, color = "black", family = "Trebuchet MS", hjust = 0.5,vjust = -6), plot.background = element_rect(fill = "darkgray"), panel.background = element_rect(fill = "darkgray")) +
+  labs(title = paste0(shooter, " (", shots_player$team.name[1], ")"),subtitle=paste0("Non-penalty league shots, 2015-16 (", nrow(shots_player), " shots, ", round(sum(shots_player$shot.statsbomb_xg)/nrow(shots_player),3), " xG per shot)" ), color = "Outcome", size = "xG") + 
+  scale_color_manual(values = c("Blocked" = "red",
+                                "Off Target" = "red",
+                                "Wayward" = "darkred", 
+                                "Saved" = "white",
+                                "Goal" = "green"), 
+                       breaks = c("Goal", "Saved", "Blocked", "Off Target", "Wayward")) + 
+    guides(color = guide_legend(override.aes = list(size = 5))) +
+  coord_fixed(ratio = 1)
+
+```
+
+```{r}
+teamshots_sp <- np_shots %>%
+  filter(play_pattern.name %in% c("From Corner", "From Free Kick", "From Kick Off", "From Throw In")) %>%
+  group_by(team.name) %>%
+  summarize(sp_shots = n(), sp_xg = sum(shot.statsbomb_xg))
+
+teamshots <- np_shots %>%
+  group_by(team.name) %>%
+  summarize(shots = n(), xg = sum(shot.statsbomb_xg))
+
+teamshots <- teamshots %>%
+  left_join(teamshots_sp, by = c("team.name" = "team.name")) %>%
+  mutate(sp_xg_pct = 100*(sp_xg)/(xg))
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
